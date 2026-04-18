@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-service
+  labels:
+    app: fastapi
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: fastapi
+  ports:
+  - port: {{ .Values.service.port }}
+    targetPort: {{ .Values.containerPort }}
+    nodePort: {{ .Values.service.nodePort }}

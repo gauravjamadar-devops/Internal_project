@@ -1,9 +1,11 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fastapi-deployment
+  name: {{ .Release.Name }}-deployment
+  labels:
+    app: fastapi
 spec:
-  replicas: 2
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
       app: fastapi
@@ -14,32 +16,32 @@ spec:
     spec:
       containers:
       - name: fastapi
-        image: fastapi-tasks:1.2
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
         ports:
-        - containerPort: 8000
+        - containerPort: {{ .Values.containerPort }}
         env:
         - name: FAIL_HEALTH
-          value: "false"  # Set to "true" to break it, "false" to fix it
+          value: {{ .Values.env.FAIL_HEALTH | quote }}
         - name: APP_NAME
           valueFrom:
             configMapKeyRef:
-              name: fastapi-config
+              name: {{ .Release.Name }}-config
               key: APP_NAME
         - name: ENVIRONMENT
           valueFrom:
             configMapKeyRef:
-              name: fastapi-config
+              name: {{ .Release.Name }}-config
               key: ENVIRONMENT
         livenessProbe:
           httpGet:
             path: /health
-            port: 8000
+            port: {{ .Values.containerPort }}
           initialDelaySeconds: 5
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /health
-            port: 8000
+            port: {{ .Values.containerPort }}
           initialDelaySeconds: 5
           periodSeconds: 10
-       
