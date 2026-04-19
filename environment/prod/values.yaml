@@ -1,0 +1,22 @@
+replicaCount: 2
+
+image:
+  repository: fastapi-tasks
+  tag: "1.2"
+  pullPolicy: IfNotPresent
+
+containerPort: 8000
+
+service:
+  type: NodePort
+  port: 8000
+  nodePort: 30007
+
+env:
+  FAIL_HEALTH: "false"
+
+config:
+  APP_NAME: "FastAPI Tasks for prod"
+  ENVIRONMENT: ""
+
+ # commenting for testing 
