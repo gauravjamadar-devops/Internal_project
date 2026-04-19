@@ -11,7 +11,7 @@ spec:
     path: fastapi-chart
     helm:
       valueFiles:
-        - ../environments/prod/values.yaml
+        - ../environment/prod/values.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: prod
