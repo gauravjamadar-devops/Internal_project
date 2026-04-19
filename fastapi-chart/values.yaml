@@ -13,7 +13,7 @@ service:
   nodePort: 30007
 
 env:
-  FAIL_HEALTH: "true"
+  FAIL_HEALTH: "false"
 
 config:
   APP_NAME: "FastAPI Tasks"
