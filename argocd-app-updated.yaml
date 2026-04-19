@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fastapi-app
+  namespace: argocd
+spec:
+  destination:
+    namespace: default
+    server: https://kubernetes.default.svc
+  project: default
+  source:
+    repoURL: https://github.com/gauravjamadar-devops/Internal_project.git
+    path: fastapi-chart
+    targetRevision: helm-charts
+    helm:
+      releaseName: fastapi
+      valueFiles:
+      - values.yaml
+  syncPolicy:
+    automated:
+      enabled: true
+      prune: true
+      selfHeal: true
