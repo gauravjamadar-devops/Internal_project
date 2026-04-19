@@ -10,7 +10,7 @@ containerPort: 8000
 service:
   type: NodePort
   port: 8000
-  nodePort: 30007
+  nodePort: 30009
 
 env:
   FAIL_HEALTH: "false"
