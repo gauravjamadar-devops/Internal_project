@@ -9,6 +9,8 @@ spec:
   selector:
     app: fastapi
   ports:
-  - port: {{ .Values.service.port }}
+  - name: http
+    port: {{ .Values.service.port }}
     targetPort: {{ .Values.containerPort }}
     nodePort: {{ .Values.service.nodePort }}
+  
