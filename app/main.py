@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, HTTPException
 import os
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Histogram
@@ -20,21 +19,31 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         start_time = time.time()
         response = await call_next(request)
         process_time = time.time() - start_time
-        
-        request_count.labels(method=request.method, endpoint=request.url.path, status=response.status_code).inc()
-        request_duration.labels(method=request.method, endpoint=request.url.path).observe(process_time)
-        
+
+        # Ensure labels are strings
+        request_count.labels(
+            method=request.method,
+            endpoint=request.url.path,
+            status=str(response.status_code)
+        ).inc()
+
+        request_duration.labels(
+            method=request.method,
+            endpoint=request.url.path
+        ).observe(process_time)
+
         return response
 
+# Register middleware
 app.add_middleware(MetricsMiddleware)
 
+# Expose metrics endpoint
 @app.get("/metrics")
 def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/health")
 def health():
-    # If the "FAIL_HEALTH" variable is set to "true", return an error
     if os.getenv("FAIL_HEALTH") == "true":
         raise HTTPException(status_code=500, detail="Simulated Failure")
     return {"status": "ok"}    
@@ -46,7 +55,7 @@ def get_tasks():
 @app.post("/tasks")
 def add_task(task: str):
     tasks.append(task)
-    task_count.inc()  # Increment custom metric
+    task_count.inc()
     return {"message": "Task added", "tasks": tasks}
 
 @app.get("/config")
