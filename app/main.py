@@ -3,9 +3,9 @@ import os
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Histogram
 from starlette.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware import Middleware
 import time
 
-app = FastAPI()
 tasks = []
 
 # Define Prometheus metrics
@@ -16,9 +16,9 @@ task_count = Counter('app_tasks_total', 'Total tasks created', [])
 # Middleware for automatic HTTP metrics
 class MetricsMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        start_time = time.time()
+        start_time = time.perf_counter()
         response = await call_next(request)
-        process_time = time.time() - start_time
+        process_time = time.perf_counter() - start_time
 
         # Ensure labels are strings
         request_count.labels(
@@ -34,8 +34,12 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 
         return response
 
-# Register middleware
-app.add_middleware(MetricsMiddleware)
+# Register middleware at app creation
+middleware = [
+    Middleware(MetricsMiddleware)
+]
+
+app = FastAPI(middleware=middleware)
 
 # Expose metrics endpoint
 @app.get("/metrics")
