@@ -2,7 +2,7 @@ replicaCount: 2
 
 image:
   repository: fastapi-tasks
-  tag: "1.6"
+  tag: "1.7"
   pullPolicy: IfNotPresent
 
 containerPort: 8000
