@@ -6,11 +6,11 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: fastapi   # <-- lowercase to match your service
+      app: fastapi   # lowercase to match your service
   namespaceSelector:
     matchNames:
-      - dev          # <-- include the dev namespace
+      - dev
   endpoints:
-    - port: http     # must match the port name in your Service spec
+    - port: http     # must match the port name in your Service
       path: /metrics
       interval: 30s
