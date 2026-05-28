@@ -1,0 +1,26 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fastapi-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: fastapi.rules
+    rules:
+    - alert: FastAPINotScraping
+      expr: absent(up{job="fastapi"})
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "FastAPI is not being scraped"
+        description: "Prometheus has no scrape target for the FastAPI service in namespace dev."
+
+    - alert: FastAPIHighErrorRate
+      expr: rate(http_requests_total{job="fastapi",status=~"5.."}[5m]) > 0.05
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "FastAPI 5xx error rate high"
+        description: "FastAPI 5xx error rate is above 5% over 5 minutes."
