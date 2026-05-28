@@ -9,8 +9,7 @@ spec:
     repoURL: 'https://github.com/gauravjamadar-devops/Internal_project.git'
     targetRevision: helm-charts
     path: monitoring
-    helm:
-      dependencyUpdate: true
+    helm: {}
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
