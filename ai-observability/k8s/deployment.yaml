@@ -1,0 +1,55 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-observability
+  namespace: dev
+  labels:
+    app: mcp-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-observability
+  template:
+    metadata:
+      labels:
+        app: mcp-observability
+    spec:
+      serviceAccountName: mcp-observability-sa
+      containers:
+        - name: mcp-server
+          image: mcp-observability:latest
+          imagePullPolicy: Never            # uses local Minikube image
+          env:
+            - name: PROMETHEUS_URL
+              value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-observability-service
+  namespace: dev
+  labels:
+    app: mcp-observability
+spec:
+  selector:
+    app: mcp-observability
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

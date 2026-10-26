@@ -1,0 +1,52 @@
+---
+# ServiceAccount used by the MCP server pod
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-observability-sa
+  namespace: dev
+  labels:
+    app: mcp-observability
+
+---
+# ClusterRole: read-only access to pods, events, namespaces
+# Intentionally restrictive — MCP server only needs to READ, not write
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-observability-reader
+  labels:
+    app: mcp-observability
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/status
+      - pods/log
+      - events
+      - namespaces
+      - services
+      - endpoints
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+    verbs: ["get", "list", "watch"]
+
+---
+# Bind the ClusterRole to the MCP server ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcp-observability-reader-binding
+  labels:
+    app: mcp-observability
+subjects:
+  - kind: ServiceAccount
+    name: mcp-observability-sa
+    namespace: dev
+roleRef:
+  kind: ClusterRole
+  name: mcp-observability-reader
+  apiGroup: rbac.authorization.k8s.io

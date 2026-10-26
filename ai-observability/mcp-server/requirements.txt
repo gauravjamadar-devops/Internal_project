@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+mcp[cli]
+kubernetes
+httpx
+pyyaml

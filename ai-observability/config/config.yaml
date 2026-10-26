@@ -1,0 +1,15 @@
+# AI Observability MCP Server Configuration
+# Prometheus URL: use in-cluster DNS when deployed on Kubernetes,
+#                 or localhost:9090 when port-forwarding locally.
+prometheus:
+  url: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+  # For local dev (kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring):
+  # url: "http://localhost:9090"
+
+# Target Kubernetes namespaces for observability
+namespaces:
+  - dev
+  - prod
+
+# FastAPI job name as registered in Prometheus (matches ServiceMonitor)
+fastapi_job: "fastapi-servicemonitor"
