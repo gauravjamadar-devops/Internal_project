@@ -33,15 +33,25 @@ spec:
             configMapKeyRef:
               name: {{ .Release.Name }}-config
               key: ENVIRONMENT
+        startupProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.containerPort }}
+          failureThreshold: 30
+          periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /health
             port: {{ .Values.containerPort }}
-          initialDelaySeconds: 5
-          periodSeconds: 10
+          initialDelaySeconds: 15
+          timeoutSeconds: 10
+          periodSeconds: 20
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /health
             port: {{ .Values.containerPort }}
-          initialDelaySeconds: 5
+          initialDelaySeconds: 10
+          timeoutSeconds: 10
           periodSeconds: 10
+          failureThreshold: 6
