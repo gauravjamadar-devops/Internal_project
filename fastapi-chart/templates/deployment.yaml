@@ -23,6 +23,8 @@ spec:
         env:
         - name: FAIL_HEALTH
           value: {{ .Values.env.FAIL_HEALTH | quote }}
+        - name: ENABLE_SIMULATE_ERROR
+          value: {{ .Values.env.ENABLE_SIMULATE_ERROR | quote }}
         - name: APP_NAME
           valueFrom:
             configMapKeyRef:

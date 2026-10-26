@@ -3,14 +3,18 @@ kind: ServiceMonitor
 metadata:
   name: fastapi-servicemonitor
   namespace: monitoring
+  labels:
+    release: monitoring          # REQUIRED: Prometheus serviceMonitorSelector matches this
+    app: fastapi
 spec:
   selector:
     matchLabels:
-      app: fastapi   # lowercase to match your service
+      app: fastapi
   namespaceSelector:
     matchNames:
       - dev
+      - prod
   endpoints:
-    - port: http     # must match the port name in your Service
+    - port: http                 # matches the port name in the Service
       path: /metrics
       interval: 30s
