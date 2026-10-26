@@ -12,6 +12,8 @@ tasks = []
 request_count = Counter('app_requests_total', 'Total requests', ['method', 'endpoint', 'status'])
 request_duration = Histogram('app_request_duration_seconds', 'Request duration', ['method', 'endpoint'])
 task_count = Counter('app_tasks_total', 'Total tasks created', [])
+# Dedicated error counter for easy PromQL querying in AI observability
+error_count = Counter('app_http_errors_total', 'Total intentional HTTP 5xx errors', ['endpoint'])
 
 # Middleware for automatic HTTP metrics
 class MetricsMiddleware(BaseHTTPMiddleware):
@@ -50,7 +52,22 @@ def metrics():
 def health():
     if os.getenv("FAIL_HEALTH") == "true":
         raise HTTPException(status_code=500, detail="Simulated Failure")
-    return {"status": "ok"}    
+    return {"status": "ok"}
+
+# -----------------------------------------------------------------------
+# DEV-ONLY: Controlled failure endpoint for observability testing.
+# Guarded by ENABLE_SIMULATE_ERROR env var — NOT enabled in prod.
+# Mirrors the FAIL_HEALTH guard pattern used above.
+# -----------------------------------------------------------------------
+@app.get("/simulate-error")
+def simulate_error():
+    if os.getenv("ENABLE_SIMULATE_ERROR") != "true":
+        raise HTTPException(
+            status_code=404,
+            detail="Endpoint not available in this environment"
+        )
+    error_count.labels(endpoint="/simulate-error").inc()
+    raise HTTPException(status_code=500, detail="Simulated 500 error for observability testing")
 
 @app.get("/tasks")
 def get_tasks():
