@@ -1,0 +1,7 @@
+#!/bin/bash
+
+# Loops through a predefined list of servers
+for SERVER in server-01 server-02 server-03; do
+    echo "Backing up data from $SERVER..."
+done
+
