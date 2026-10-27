@@ -1,178 +1,120 @@
 # AI DevOps Observability Assistant
 
-A lightweight AI observability component that extends the existing FastAPI + Kubernetes + ArgoCD + Prometheus GitOps stack.
+The project connects an AI client to read-only observability evidence from
+Kubernetes, Prometheus, Alertmanager, and ArgoCD through an MCP server. Skills
+guide the AI through alert-first triage, targeted investigation, evidence-based
+recommendations, and post-remediation validation.
+
+**The server does not remediate workloads.** It can update its local incident
+record, but all cluster changes remain human-approved and GitOps-managed.
+
+## Documentation
+
+- [Project guide](PROJECT_GUIDE.md): architecture, MCP and skills concepts,
+  tool catalog, setup, and presentation Q&A.
+- [Incident response guide](INCIDENT_RESPONSE.md): incident lifecycle,
+  security boundaries, validation, and controlled dev scenarios.
+- [DevOps Investigator skill](skills/devops_investigator.md): the end-to-end
+  orchestration workflow.
 
 ## Architecture
 
-```
-FastAPI (/metrics)
-    ↓ scraped every 30s
-Prometheus (kube-prometheus-stack)
-    ↓ PromQL HTTP API
-MCP Server (ai-observability/mcp-server/)
-    ↓ stdio locally / Streamable HTTP in Kubernetes
-AI Assistant (Claude / Antigravity)
-    ↓ structured investigation
-Incident Analysis Report
-```
-
-## Directory Structure
-
-```
-ai-observability/
-├── mcp-server/
-│   ├── main.py                  # MCP server entrypoint (6 tools)
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── tools/
-│       ├── kubernetes_tools.py  # get_pods, get_pod_status, get_pod_restarts, get_kubernetes_events
-│       └── prometheus_tools.py  # get_error_rate, get_application_health
-├── skills/
-│   └── devops_investigator.md   # AI investigation protocol
-├── config/
-│   └── config.yaml              # Prometheus URL, namespace config
-└── k8s/
-    ├── rbac.yaml                # Read-only ServiceAccount + namespace Roles
-    └── deployment.yaml          # MCP server Deployment + Service
+```text
+FastAPI /metrics ──scraped──> Prometheus ──query──┐
+                                                   │
+Kubernetes API <── read-only ServiceAccount ── MCP server
+Alertmanager ──────────────────────────────────────┤
+ArgoCD API <── read-only Application RBAC ─────────┘
+                                                   │ MCP
+                                                   v
+                                    AI client + incident-response skills
+                                                   │
+                                                   v
+                                    evidence report and recommendation
+                                                   │
+                               human-reviewed GitOps change, if approved
 ```
 
-## Available MCP Tools
+The in-cluster MCP server uses Streamable HTTP at `/mcp`; local development
+defaults to stdio. The server is configured for the `dev` namespace and
+`fastapi-dev-deployment` workload by default. Production access is not enabled
+by the checked-in defaults.
 
-| Tool | Description |
-|------|-------------|
-| `get_pods_tool(namespace)` | List pods with phase, ready status, restart count |
-| `get_pod_status_tool(namespace, pod_name)` | Detailed container state, conditions, IP |
-| `get_pod_restarts_tool(namespace)` | Restart counts sorted highest first |
-| `get_kubernetes_events_tool(namespace)` | Warning-level K8s events (last 20) |
-| `get_error_rate_tool(namespace)` | HTTP 5xx rate + % via PromQL |
-| `get_application_health_tool(namespace)` | Composite health: scrape + req rate + P99 latency |
+## MCP tool groups
 
-## Quick Start — Local Development
+| Group | Tools |
+|---|---|
+| Alert intake and planning | `get_active_alerts_tool`, `get_alert_details_tool`, `get_silenced_alerts_tool`, `classify_alert_tool`, `get_investigation_plan_tool` |
+| Kubernetes evidence | `get_pods_tool`, `get_pod_status_tool`, `get_pod_restarts_tool`, `get_deployment_status_tool`, `get_replicaset_status_tool`, `get_kubernetes_events_tool`, `get_recent_rollout_tool`, `describe_workload_tool`, `get_pod_logs_tool`, `get_previous_pod_logs_tool`, `search_pod_logs_tool` |
+| Prometheus evidence | `query_prometheus_tool`, `get_error_rate_tool`, `get_request_rate_tool`, `get_request_latency_tool`, `get_resource_usage_tool`, `get_pod_cpu_tool`, `get_pod_memory_tool`, `get_available_replicas_tool`, `get_container_restart_metrics_tool`, `get_application_health_tool` |
+| Approved endpoint and recovery | `check_application_endpoint_tool`, `validate_recovery_tool` |
+| ArgoCD evidence | `get_argocd_application_status_tool`, `get_argocd_sync_status_tool`, `get_current_image_tool`, `get_deployment_revision_tool` |
+| Incident record | `get_incidents_tool`, `update_incident_state_tool` |
 
-### Prerequisites
-```bash
-# Ensure Minikube is running
-minikube status
+Tools are read-only with respect to the cluster and GitOps. Prometheus queries
+are constrained; Kubernetes namespaces/workloads and ArgoCD applications are
+allowlisted; logs are bounded and redacted; endpoint checks are restricted to
+configured services and approved paths.
 
-# Port-forward Prometheus for local access
-kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring
-```
+## Alert rules
 
-### Install and Run MCP Server Locally
-```bash
-cd ai-observability/mcp-server
-pip install -r requirements.txt
+The Helm-managed `PrometheusRule` in `monitoring/templates/fastapi-alert-rules.yaml`
+includes dev-scoped rules for CrashLoopBackOff, sustained HTTP 5xx, target down,
+no available replicas, high CPU, memory near a configured limit, and
+OOMKilled. Thresholds and target labels are in `monitoring/values.yaml`.
 
-# Set Prometheus to localhost (port-forwarded)
-export PROMETHEUS_URL=http://localhost:9090
+The memory rule intentionally produces no alert if the workload has no
+configured memory-limit metric. Do not treat absent metrics as a healthy
+measurement.
 
-# Run MCP server
-python main.py
-```
+## Local validation
 
-The local default is stdio. To run the HTTP transport locally, set
-`MCP_TRANSPORT=streamable-http`, `MCP_HOST=127.0.0.1`, and `MCP_PORT=8080`.
+From `ai-observability/mcp-server`:
 
-### Test MCP Tools Directly
-```python
-# Quick smoke test
-from tools.kubernetes_tools import get_pods, get_pod_restarts, get_kubernetes_events
-from tools.prometheus_tools import get_error_rate, get_application_health
-
-print(get_pods("dev"))
-print(get_pod_restarts("dev"))
-print(get_error_rate("dev"))
-print(get_application_health("dev"))
-```
-
-Run the isolated tool tests from `ai-observability/mcp-server`:
-```bash
+```powershell
 python -m unittest discover -s tests -v
 ```
 
-## Quick Start — Kubernetes Deployment
+The MCP server can be run locally in stdio mode. Configure its Prometheus and
+Alertmanager URLs and Kubernetes credentials for the environment being tested;
+the in-cluster DNS defaults are not reachable from an ordinary local process.
+See the project guide before starting the server.
 
-```bash
-# 1. Build the image using the ai-observability directory as the build context
-docker build -t mcp-observability:latest -f ai-observability/mcp-server/Dockerfile ai-observability
+Validate the Helm charts without deploying:
 
-# 2. Load the image into Minikube
-minikube image load mcp-observability:latest
-
-# 3. Apply read-only RBAC
-kubectl apply -f ai-observability/k8s/rbac.yaml
-
-# 4. Deploy MCP server
-kubectl apply -f ai-observability/k8s/deployment.yaml
-
-# 5. Check it's running
-kubectl get pods -n dev -l app=mcp-observability
-
-# 6. Open a local tunnel for an MCP client
-kubectl port-forward -n dev svc/mcp-observability-service 8080:8080
+```powershell
+helm lint monitoring
+helm template monitoring monitoring --namespace monitoring
+helm lint fastapi-chart
+helm template fastapi-dev fastapi-chart --namespace dev -f environment/dev/values.yaml
+helm template fastapi-dev fastapi-chart --namespace dev -f environment/dev/values.yaml --set incidentTestMode=true
 ```
 
-The in-cluster server uses Streamable HTTP at `http://localhost:8080/mcp` through
-the port-forward. The Service is ClusterIP-only; do not expose it publicly
-without adding authentication and TLS.
+`incidentTestMode` is a bounded, hard-coded startup-failure switch and Helm
+rejects it outside the `dev` namespace. It defaults to `false`; it is not an
+arbitrary command override. Do not enable it outside an approved dev
+demonstration window.
 
-## Testing the Full Flow
+## State and operational limitations
 
-### Generate Controlled Errors (dev only)
-```bash
-# Hit the simulate-error endpoint a few times
-MINIKUBE_IP=$(minikube ip)
-for i in {1..10}; do curl http://$MINIKUBE_IP:30008/simulate-error; done
-```
+- The incident SQLite database is mounted on `emptyDir`; records are lost when
+  the MCP pod is recreated. Use a persistent volume or external database if
+  durable history is required.
+- Incident identity is deduplicated by Alertmanager fingerprint. This is a
+  current-state tracker, not a full immutable audit/history system.
+- FastAPI application source is not present in this checkout. The guide uses
+  the existing dev `/simulate-error` behavior and does not invent app routes.
+- The current dev workload has no confirmed memory limit; the memory ratio
+  alert therefore may have no data to evaluate.
+- The repo's existing Alertmanager notification configuration requires a
+  separate secure-secret migration and credential-rotation follow-up. Never
+  place webhook credentials in documentation, logs, or source-controlled
+  plaintext values.
 
-### Ask the AI to Investigate
-With the MCP server running and configured in your AI client:
+## Deployment
 
-> "Investigate the dev FastAPI application."
-
-The AI will:
-1. Call `get_pods_tool("dev")` — pod health
-2. Call `get_pod_restarts_tool("dev")` — restart patterns
-3. Call `get_kubernetes_events_tool("dev")` — warning events
-4. Call `get_application_health_tool("dev")` — Prometheus metrics
-5. Call `get_error_rate_tool("dev")` — HTTP error rate
-6. Synthesize into a structured incident report
-
-## Prometheus Validation
-
-After applying the ServiceMonitor fix:
-```bash
-# Check Prometheus targets
-kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring
-# Then open: http://localhost:9090/targets
-# Look for: fastapi-servicemonitor target — should be UP
-
-# Test PromQL directly
-curl 'http://localhost:9090/api/v1/query?query=app_requests_total'
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PROMETHEUS_URL` | from config.yaml | Prometheus HTTP API base URL |
-| `MCP_CONFIG_PATH` | `ai-observability/config/config.yaml` | Path to MCP config file |
-| `MCP_TRANSPORT` | `stdio` | `stdio` locally or `streamable-http` in Kubernetes |
-| `MCP_HOST` | `127.0.0.1` | HTTP bind address |
-| `MCP_PORT` | `8080` | HTTP bind port |
-
-## FastAPI Changes (main branch)
-
-- **`/simulate-error`** — Returns HTTP 500. Only active when `ENABLE_SIMULATE_ERROR=true`.
-  - Enabled in `dev` via `environment/dev/values.yaml`
-  - Disabled in `prod` (default `false`)
-- **`app_http_errors_total`** — New Prometheus Counter tracking intentional errors
-
-## What Was NOT Changed
-
-- ✅ ArgoCD applications untouched
-- ✅ Existing Helm chart structure preserved
-- ✅ Prod environment unchanged
-- ✅ No second Prometheus/Grafana installed
-- ✅ Jenkins CI/CD flow unaffected
-- ✅ kube-prometheus-stack untouched (only ServiceMonitor fixed)
+No cluster changes are applied by the local test commands above. Build and
+deploy the MCP server and apply Helm-managed alert changes through the
+repository's reviewed deployment process. Confirm rendered manifests and
+RBAC before applying them. Do not expose the MCP Service publicly without
+authentication and TLS.

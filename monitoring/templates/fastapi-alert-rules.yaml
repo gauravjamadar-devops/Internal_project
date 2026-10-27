@@ -1,0 +1,182 @@
+{{- if .Values.fastapiIncidentAlerts.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fastapi-incident-alerts
+  namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+  labels:
+    release: monitoring
+    app: fastapi
+spec:
+  groups:
+    - name: fastapi.incident.rules
+      interval: 30s
+      rules:
+        - alert: FastAPICrashLooping
+          expr: >-
+            kube_pod_container_status_waiting_reason{
+              namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+              pod=~"{{ .Values.fastapiIncidentAlerts.workload }}-.*",
+              reason="CrashLoopBackOff"
+            } == 1
+          for: 1m
+          labels:
+            severity: critical
+            namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+            workload: {{ .Values.fastapiIncidentAlerts.workload | quote }}
+            category: kubernetes_workload
+          annotations:
+            summary: "FastAPI container is repeatedly failing to start"
+            description: >-
+              A container in {{ .Values.fastapiIncidentAlerts.workload }}
+              has remained in CrashLoopBackOff for 1 minute.
+
+        - alert: FastAPIHigh5xxRate
+          expr: >-
+            (
+              sum by (namespace) (
+                rate(app_requests_total{
+                  namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+                  status=~"5..",
+                  pod=~"{{ .Values.fastapiIncidentAlerts.workload }}-.*"
+                }[5m])
+              )
+              /
+              clamp_min(
+                sum by (namespace) (
+                  rate(app_requests_total{
+                    namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+                    pod=~"{{ .Values.fastapiIncidentAlerts.workload }}-.*"
+                  }[5m])
+                ),
+                0.001
+              )
+            ) > {{ .Values.fastapiIncidentAlerts.thresholds.http5xxRatio }}
+          for: 2m
+          labels:
+            severity: warning
+            namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+            workload: {{ .Values.fastapiIncidentAlerts.workload | quote }}
+            category: application_error
+          annotations:
+            summary: "FastAPI HTTP 5xx ratio is elevated"
+            description: >-
+              The 5xx request ratio for {{ .Values.fastapiIncidentAlerts.workload }}
+              in {{ .Values.fastapiIncidentAlerts.namespace }} exceeded
+              {{ .Values.fastapiIncidentAlerts.thresholds.http5xxRatio }} for 2 minutes.
+
+        - alert: FastAPITargetDown
+          expr: >-
+            absent(up{
+              namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+              job="{{ .Values.fastapiIncidentAlerts.service }}"
+            })
+            or
+            up{
+              namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+              job="{{ .Values.fastapiIncidentAlerts.service }}"
+            } == 0
+          for: 2m
+          labels:
+            severity: critical
+            namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+            workload: {{ .Values.fastapiIncidentAlerts.workload | quote }}
+            category: availability
+          annotations:
+            summary: "FastAPI Prometheus target is unavailable"
+            description: >-
+              Prometheus has no healthy scrape target for
+              {{ .Values.fastapiIncidentAlerts.workload }} in
+              {{ .Values.fastapiIncidentAlerts.namespace }}.
+
+        - alert: FastAPIUnavailable
+          expr: >-
+            kube_deployment_status_replicas_available{
+              namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+              deployment="{{ .Values.fastapiIncidentAlerts.workload }}"
+            } < 1
+          for: 2m
+          labels:
+            severity: critical
+            namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+            workload: {{ .Values.fastapiIncidentAlerts.workload | quote }}
+            category: availability
+          annotations:
+            summary: "FastAPI has no available replicas"
+            description: >-
+              Deployment {{ .Values.fastapiIncidentAlerts.workload }} has no
+              available replicas in {{ .Values.fastapiIncidentAlerts.namespace }}.
+
+        - alert: FastAPIHighCPU
+          expr: >-
+            sum by (namespace, pod) (
+              rate(container_cpu_usage_seconds_total{
+                namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+                pod=~"{{ .Values.fastapiIncidentAlerts.workload }}-.*"
+              }[5m])
+            ) > {{ .Values.fastapiIncidentAlerts.thresholds.cpuCores }}
+          for: 5m
+          labels:
+            severity: warning
+            namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+            workload: {{ .Values.fastapiIncidentAlerts.workload | quote }}
+            category: resource
+          annotations:
+            summary: "FastAPI pod CPU usage is elevated"
+            description: >-
+              Pod {{ "{{ $labels.pod }}" }} exceeded
+              {{ .Values.fastapiIncidentAlerts.thresholds.cpuCores }} CPU cores
+              for 5 minutes.
+
+        - alert: FastAPIHighMemory
+          expr: >-
+            (
+              sum by (namespace, pod) (
+                container_memory_working_set_bytes{
+                  namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+                  pod=~"{{ .Values.fastapiIncidentAlerts.workload }}-.*"
+                }
+              )
+              /
+              on (namespace, pod)
+              sum by (namespace, pod) (
+                kube_pod_container_resource_limits{
+                  namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+                  pod=~"{{ .Values.fastapiIncidentAlerts.workload }}-.*",
+                  resource="memory"
+                }
+              )
+            ) > {{ .Values.fastapiIncidentAlerts.thresholds.memoryLimitRatio }}
+          for: 5m
+          labels:
+            severity: warning
+            namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+            workload: {{ .Values.fastapiIncidentAlerts.workload | quote }}
+            category: resource
+          annotations:
+            summary: "FastAPI pod memory usage is near its configured limit"
+            description: >-
+              Pod {{ "{{ $labels.pod }}" }} has exceeded
+              {{ .Values.fastapiIncidentAlerts.thresholds.memoryLimitRatio }}
+              of its memory limit for 5 minutes. No alert is produced when no
+              memory limit metric is configured.
+
+        - alert: FastAPIContainerOOMKilled
+          expr: >-
+            kube_pod_container_status_last_terminated_reason{
+              namespace="{{ .Values.fastapiIncidentAlerts.namespace }}",
+              pod=~"{{ .Values.fastapiIncidentAlerts.workload }}-.*",
+              reason="OOMKilled"
+            } == 1
+          for: 1m
+          labels:
+            severity: critical
+            namespace: {{ .Values.fastapiIncidentAlerts.namespace | quote }}
+            workload: {{ .Values.fastapiIncidentAlerts.workload | quote }}
+            category: resource
+          annotations:
+            summary: "FastAPI container was terminated after an out-of-memory event"
+            description: >-
+              Container {{ "{{ $labels.container }}" }} in pod
+              {{ "{{ $labels.pod }}" }} has a last termination reason of OOMKilled.
+{{- end }}

@@ -1,5 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
+{{- if and .Values.incidentTestMode (ne .Release.Namespace "dev") }}
+{{- fail "incidentTestMode is permitted only in the dev namespace" }}
+{{- end }}
 metadata:
   name: {{ .Release.Name }}-deployment
   labels:
@@ -18,6 +21,13 @@ spec:
       - name: fastapi
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- if .Values.incidentTestMode }}
+        command:
+          - python
+          - -c
+        args:
+          - "raise SystemExit('controlled dev startup failure')"
+        {{- end }}
         ports:
         - containerPort: {{ .Values.containerPort }}
         env:

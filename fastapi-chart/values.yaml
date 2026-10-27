@@ -6,6 +6,7 @@ image:
   pullPolicy: IfNotPresent
 
 containerPort: 8000
+incidentTestMode: false
 
 service:
   type: NodePort

@@ -1,182 +1,387 @@
-"""
-AI DevOps Observability MCP Server
-===================================
-Exposes 6 read-only DevOps tools via the Model Context Protocol (MCP).
+"""AI DevOps incident-response MCP server (read-only evidence tools)."""
+from __future__ import annotations
 
-Tools:
-    1. get_pods(namespace)              - List pods and their phase/ready/restart status
-    2. get_pod_status(namespace, pod)   - Detailed status for a specific pod
-    3. get_pod_restarts(namespace)      - Restart counts, sorted highest first
-    4. get_kubernetes_events(namespace) - Warning-level Kubernetes events
-    5. get_error_rate(namespace)        - HTTP 5xx error rate via Prometheus PromQL
-    6. get_application_health(namespace)- Composite health: scrape status + metrics
-
-Transport:
-    - stdio (for local AI client integration, e.g. Claude Desktop / Antigravity)
-    - Runs inside Kubernetes pod using in-cluster ServiceAccount for K8s auth
-
-Usage:
-    python main.py
-
-Environment variables:
-    PROMETHEUS_URL   - Override Prometheus URL (default: from config.yaml)
-    MCP_CONFIG_PATH  - Override config file path
-    MCP_TRANSPORT    - stdio (default) or streamable-http
-    MCP_HOST         - HTTP bind address (default: 127.0.0.1)
-    MCP_PORT         - HTTP bind port (default: 8080)
-"""
+import functools
+import inspect
+import logging
 import os
 import sys
+import time
+from typing import Any, Callable
 
-# Ensure the mcp-server directory is on the path when running directly
 sys.path.insert(0, os.path.dirname(__file__))
 
 from mcp.server.fastmcp import FastMCP
-from tools import (
-    get_pods,
-    get_pod_status,
-    get_pod_restarts,
-    get_kubernetes_events,
-    get_error_rate,
-    get_application_health,
-)
+from tools import alert_tools, argocd_tools, incident_state, incident_workflow
+from tools import kubernetes_tools as k8s
+from tools import prometheus_tools as prom
 
-# ---------------------------------------------------------------------------
-# Create MCP server instance
-# ---------------------------------------------------------------------------
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+_logger = logging.getLogger("devops-observability")
+
 mcp = FastMCP(
     name="devops-observability",
     instructions=(
-        "You are an AI DevOps Observability Assistant. "
-        "You have access to real Kubernetes and Prometheus data. "
-        "Use the available tools to investigate incidents, diagnose pod failures, "
-        "analyse error rates, and produce evidence-based incident reports. "
-        "Always retrieve live data before drawing conclusions. "
-        "When asked to 'investigate', call multiple tools to gather a full picture."
+        "You are an evidence-based DevOps incident investigation assistant. "
+        "Use active Alertmanager data first, obtain a targeted investigation plan, "
+        "and call only relevant read-only tools. Distinguish observed facts from "
+        "inference, report telemetry errors and limitations, and never perform "
+        "remediation. The human follows the GitOps process and approves changes."
     ),
     host=os.environ.get("MCP_HOST", "127.0.0.1"),
     port=int(os.environ.get("MCP_PORT", "8080")),
 )
 
-# ---------------------------------------------------------------------------
-# Tool 1: get_pods
-# ---------------------------------------------------------------------------
+
+def _audited(function: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(function)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        started = time.monotonic()
+        namespace = inspect.signature(function).bind_partial(
+            *args, **kwargs
+        ).arguments.get("namespace")
+        _logger.info(
+            "mcp_tool_start tool=%s namespace=%s",
+            function.__name__,
+            namespace if isinstance(namespace, str) else "not-applicable",
+        )
+        try:
+            result = function(*args, **kwargs)
+        except Exception as error:
+            _logger.warning(
+                "mcp_tool_failure tool=%s error_type=%s duration_ms=%.2f",
+                function.__name__,
+                type(error).__name__,
+                (time.monotonic() - started) * 1000,
+            )
+            raise
+        is_error = isinstance(result, dict) and "error" in result
+        _logger.info(
+            "mcp_tool_complete tool=%s outcome=%s duration_ms=%.2f",
+            function.__name__,
+            "error" if is_error else "success",
+            (time.monotonic() - started) * 1000,
+        )
+        return result
+
+    return wrapper
+
+
+def _register_alerts(result: dict[str, Any]) -> dict[str, Any]:
+    if "error" in result:
+        return result
+    alerts = result.get("alerts", [])
+    for alert in alerts:
+        registration = incident_state.register_incident(alert)
+        alert["incident_id"] = registration["incident"]["incident_id"]
+        alert["duplicate_active_incident"] = registration["duplicate_active"]
+        alert["reactivated_incident"] = registration["reactivated"]
+    return result
+
+
 @mcp.tool()
-def get_pods_tool(namespace: str) -> dict:
-    """
-    List all pods in the given Kubernetes namespace.
-
-    Returns pod name, phase (Running/Pending/Failed), ready container ratio,
-    total restart count, and assigned node.
-
-    Args:
-        namespace: Kubernetes namespace to query (e.g. 'dev', 'prod')
-    """
-    return get_pods(namespace)
+@_audited
+def get_active_alerts_tool() -> dict[str, Any]:
+    """Fetch active dev alerts from the configured Alertmanager and deduplicate incident state."""
+    return _register_alerts(alert_tools.get_active_alerts())
 
 
-# ---------------------------------------------------------------------------
-# Tool 2: get_pod_status
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def get_pod_status_tool(namespace: str, pod_name: str) -> dict:
-    """
-    Get detailed status for a specific pod including container states,
-    restart counts, pod conditions, and IP information.
-
-    Useful for diagnosing CrashLoopBackOff, OOMKilled, or Pending pods.
-
-    Args:
-        namespace: Kubernetes namespace
-        pod_name:  Exact pod name (get from get_pods_tool first)
-    """
-    return get_pod_status(namespace, pod_name)
+@_audited
+def get_alert_details_tool(alert_name: str, namespace: str | None = None) -> dict[str, Any]:
+    """Fetch details for an exact currently active alert name in the enabled namespace."""
+    result = alert_tools.get_alert_details(alert_name, namespace)
+    if "error" not in result:
+        _register_alerts(result)
+    return result
 
 
-# ---------------------------------------------------------------------------
-# Tool 3: get_pod_restarts
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def get_pod_restarts_tool(namespace: str) -> dict:
-    """
-    Return restart counts for every container in every pod in the namespace.
-
-    Pods are sorted by restart count (highest first). Containers with
-    more than 5 restarts are flagged for attention.
-
-    Args:
-        namespace: Kubernetes namespace to check (e.g. 'dev', 'prod')
-    """
-    return get_pod_restarts(namespace)
+@_audited
+def get_silenced_alerts_tool() -> dict[str, Any]:
+    """List active Alertmanager silences without comments or creator details."""
+    return alert_tools.get_silenced_alerts()
 
 
-# ---------------------------------------------------------------------------
-# Tool 4: get_kubernetes_events
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def get_kubernetes_events_tool(namespace: str) -> dict:
-    """
-    Return Warning-level Kubernetes events in the namespace.
-
-    Filters out normal/informational events. Returns the 20 most recent
-    warnings sorted by timestamp, including reason, message, and object.
-
-    Useful for detecting OOMKilled, BackOff, Unhealthy, FailedScheduling events.
-
-    Args:
-        namespace: Kubernetes namespace to query
-    """
-    return get_kubernetes_events(namespace)
+@_audited
+def get_investigation_plan_tool(
+    alert_name: str, namespace: str | None = None
+) -> dict[str, Any]:
+    """Classify an active alert and return its targeted tool path and selected skill."""
+    return incident_workflow.get_investigation_plan(alert_name, namespace)
 
 
-# ---------------------------------------------------------------------------
-# Tool 5: get_error_rate
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def get_error_rate_tool(namespace: str, window: str = "5m") -> dict:
-    """
-    Query Prometheus for HTTP 5xx error rate for the FastAPI application.
-
-    Uses the app_requests_total metric (instrumented in the FastAPI app).
-    Returns both the raw rate/sec and error percentage over the window.
-
-    Tip: call /simulate-error on the dev app first to generate test errors,
-    then call this tool to see them appear in metrics.
-
-    Args:
-        namespace: Kubernetes namespace (e.g. 'dev', 'prod')
-        window:    PromQL rate window (default '5m', options: '1m', '5m', '15m')
-    """
-    return get_error_rate(namespace, window)
+@_audited
+def classify_alert_tool(alert_name: str, namespace: str | None = None) -> dict[str, Any]:
+    """Return a deterministic category and ownership classification for an active alert."""
+    result = alert_tools.get_alert_details(alert_name, namespace)
+    if "error" in result:
+        return result
+    if not result["alerts"]:
+        return {"error": "No matching active Alertmanager alert"}
+    return incident_workflow.classify_alert(result["alerts"][0])
 
 
-# ---------------------------------------------------------------------------
-# Tool 6: get_application_health
-# ---------------------------------------------------------------------------
 @mcp.tool()
-def get_application_health_tool(namespace: str) -> dict:
-    """
-    Return a composite application health summary combining:
-    - Prometheus scrape target status (is FastAPI being scraped?)
-    - Current request rate (req/sec)
-    - 5xx error rate and percentage
-    - P99 request latency
-
-    Health states: HEALTHY | DEGRADED | UNKNOWN
-
-    Args:
-        namespace: Kubernetes namespace (e.g. 'dev', 'prod')
-    """
-    return get_application_health(namespace)
+@_audited
+def get_pods_tool(namespace: str, workload: str | None = None) -> dict[str, Any]:
+    """List readiness, restart count, phase, and node for allowlisted workload pods."""
+    return k8s.get_pods(namespace, workload)
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
+@mcp.tool()
+@_audited
+def get_pod_status_tool(namespace: str, pod: str) -> dict[str, Any]:
+    """Read detailed state, conditions, and termination information for an allowlisted pod."""
+    return k8s.get_pod_status(namespace, pod)
+
+
+@mcp.tool()
+@_audited
+def get_pod_restarts_tool(
+    namespace: str, workload: str | None = None
+) -> dict[str, Any]:
+    """List restart counts for allowlisted workload containers."""
+    return k8s.get_pod_restarts(namespace, workload)
+
+
+@mcp.tool()
+@_audited
+def get_deployment_status_tool(namespace: str, deployment: str) -> dict[str, Any]:
+    """Read replica health, image, resource requests/limits, probes, and rollout conditions."""
+    return k8s.get_deployment_status(namespace, deployment)
+
+
+@mcp.tool()
+@_audited
+def get_replicaset_status_tool(
+    namespace: str, deployment: str | None = None
+) -> dict[str, Any]:
+    """Read ReplicaSet readiness and revision for allowlisted deployments."""
+    return k8s.get_replicaset_status(namespace, deployment)
+
+
+@mcp.tool()
+@_audited
+def get_kubernetes_events_tool(
+    namespace: str, workload: str | None = None
+) -> dict[str, Any]:
+    """Return up to 20 recent warning events, optionally filtered to one workload."""
+    return k8s.get_kubernetes_events(namespace, workload)
+
+
+@mcp.tool()
+@_audited
+def get_recent_rollout_tool(namespace: str, deployment: str) -> dict[str, Any]:
+    """Read recent ReplicaSet revisions and deployment revision without changing the rollout."""
+    return k8s.get_recent_rollout(namespace, deployment)
+
+
+@mcp.tool()
+@_audited
+def describe_workload_tool(namespace: str, workload: str) -> dict[str, Any]:
+    """Summarize an allowlisted deployment, its pods, and ReplicaSets without environment values."""
+    return k8s.describe_workload(namespace, workload)
+
+
+@mcp.tool()
+@_audited
+def get_pod_logs_tool(
+    namespace: str,
+    pod: str,
+    container: str | None = None,
+    tail_lines: int = 200,
+) -> dict[str, Any]:
+    """Read bounded, redacted current logs from an allowlisted pod container."""
+    return k8s.get_pod_logs(namespace, pod, container, tail_lines)
+
+
+@mcp.tool()
+@_audited
+def get_previous_pod_logs_tool(
+    namespace: str,
+    pod: str,
+    container: str | None = None,
+    tail_lines: int = 200,
+) -> dict[str, Any]:
+    """Read bounded, redacted logs from the previous container instance."""
+    return k8s.get_previous_pod_logs(namespace, pod, container, tail_lines)
+
+
+@mcp.tool()
+@_audited
+def search_pod_logs_tool(
+    namespace: str,
+    workload: str,
+    patterns: list[str],
+    tail_lines: int = 500,
+) -> dict[str, Any]:
+    """Search bounded allowlisted workload logs using up to five literal patterns."""
+    return k8s.search_pod_logs(namespace, workload, patterns, tail_lines)
+
+
+@mcp.tool()
+@_audited
+def query_prometheus_tool(query: str) -> dict[str, Any]:
+    """Run one exact pre-approved dev PromQL expression; arbitrary PromQL is rejected."""
+    return prom.query_prometheus(query)
+
+
+@mcp.tool()
+@_audited
+def get_error_rate_tool(
+    namespace: str, window: str = "5m", workload: str | None = None
+) -> dict[str, Any]:
+    """Return 5xx rate, total request rate, error percentage, and simulated errors."""
+    return prom.get_error_rate(namespace, window, workload)
+
+
+@mcp.tool()
+@_audited
+def get_request_rate_tool(
+    namespace: str, workload: str | None = None, window: str = "5m"
+) -> dict[str, Any]:
+    """Return an application request rate over an allowed Prometheus time window."""
+    return prom.get_request_rate(namespace, workload, window)
+
+
+@mcp.tool()
+@_audited
+def get_request_latency_tool(
+    namespace: str, workload: str | None = None, window: str = "5m"
+) -> dict[str, Any]:
+    """Return P99 request latency from application histogram buckets."""
+    return prom.get_request_latency(namespace, workload, window)
+
+
+@mcp.tool()
+@_audited
+def get_resource_usage_tool(
+    namespace: str, workload: str | None = None
+) -> dict[str, Any]:
+    """Query available CPU/memory usage, requests, and limits without inventing missing metrics."""
+    return prom.get_resource_usage(namespace, workload)
+
+
+@mcp.tool()
+@_audited
+def get_pod_cpu_tool(namespace: str, pod: str | None = None) -> dict[str, Any]:
+    """Read CPU usage for the configured workload or one of its pods."""
+    return prom.get_pod_cpu(namespace, pod)
+
+
+@mcp.tool()
+@_audited
+def get_pod_memory_tool(namespace: str, pod: str | None = None) -> dict[str, Any]:
+    """Read memory working set for the configured workload or one of its pods."""
+    return prom.get_pod_memory(namespace, pod)
+
+
+@mcp.tool()
+@_audited
+def get_available_replicas_tool(namespace: str, deployment: str) -> dict[str, Any]:
+    """Read available replicas from kube-state-metrics."""
+    return prom.get_available_replicas(namespace, deployment)
+
+
+@mcp.tool()
+@_audited
+def get_container_restart_metrics_tool(
+    namespace: str, workload: str | None = None
+) -> dict[str, Any]:
+    """Read container restart counters from Prometheus for the selected workload."""
+    return prom.get_container_restart_metrics(namespace, workload)
+
+
+@mcp.tool()
+@_audited
+def get_application_health_tool(
+    namespace: str, workload: str | None = None
+) -> dict[str, Any]:
+    """Summarize scrape health, request/error rates, and P99 latency."""
+    return prom.get_application_health(namespace, workload)
+
+
+@mcp.tool()
+@_audited
+def check_application_endpoint_tool(
+    namespace: str,
+    endpoint: str = "/health",
+    workload: str = "fastapi-dev-deployment",
+) -> dict[str, Any]:
+    """Check only the configured in-cluster application service and approved endpoint paths."""
+    return k8s.check_application_endpoint(namespace, endpoint, workload)
+
+
+@mcp.tool()
+@_audited
+def validate_recovery_tool(
+    namespace: str,
+    workload: str = "fastapi-dev-deployment",
+    incident_id: str | None = None,
+) -> dict[str, Any]:
+    """Validate alert clearance, ready replicas, health endpoint, and Prometheus before reporting recovery."""
+    return incident_workflow.validate_recovery(namespace, workload, incident_id)
+
+
+@mcp.tool()
+@_audited
+def get_argocd_application_status_tool(application: str) -> dict[str, Any]:
+    """Read sync and health state for the allowlisted ArgoCD application."""
+    return argocd_tools.get_argocd_application_status(application)
+
+
+@mcp.tool()
+@_audited
+def get_argocd_sync_status_tool(application: str) -> dict[str, Any]:
+    """Read sync/health status for the allowlisted ArgoCD application."""
+    return argocd_tools.get_argocd_sync_status(application)
+
+
+@mcp.tool()
+@_audited
+def get_current_image_tool(namespace: str, deployment: str) -> dict[str, Any]:
+    """Read the currently configured container image without exposing environment values."""
+    return argocd_tools.get_current_image(namespace, deployment)
+
+
+@mcp.tool()
+@_audited
+def get_deployment_revision_tool(namespace: str, deployment: str) -> dict[str, Any]:
+    """Read the deployment revision and observed generation."""
+    return argocd_tools.get_deployment_revision(namespace, deployment)
+
+
+@mcp.tool()
+@_audited
+def get_incidents_tool(limit: int = 50) -> dict[str, Any]:
+    """List recent tracked incident state records (maximum 100)."""
+    return {"incidents": incident_state.get_incidents(limit)}
+
+
+@mcp.tool()
+@_audited
+def update_incident_state_tool(
+    incident_id: str,
+    status: str,
+    probable_cause: str | None = None,
+    recommended_solution: str | None = None,
+    validation_result: str | None = None,
+) -> dict[str, Any]:
+    """Record an investigation state and redacted summary; this does not remediate workloads."""
+    return incident_state.update_incident(
+        incident_id,
+        status,
+        probable_cause,
+        recommended_solution,
+        validation_result,
+    )
+
+
 if __name__ == "__main__":
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
     if transport not in {"stdio", "streamable-http"}:
-        raise ValueError(
-            "MCP_TRANSPORT must be either 'stdio' or 'streamable-http'"
-        )
+        raise ValueError("MCP_TRANSPORT must be either 'stdio' or 'streamable-http'")
     mcp.run(transport=transport)

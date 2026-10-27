@@ -19,22 +19,37 @@ spec:
       serviceAccountName: mcp-observability-sa
       containers:
         - name: mcp-server
-          image: mcp-observability:latest
+          image: mcp-observability:incident-response-20261027
           imagePullPolicy: Never            # uses local Minikube image
           ports:
             - name: http
               containerPort: 8080
           env:
             - name: PROMETHEUS_URL
-              value: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+              value: "http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090"
+            - name: ALERTMANAGER_URL
+              value: "http://monitoring-kube-prometheus-alertmanager.monitoring.svc:9093"
             - name: MCP_CONFIG_PATH
               value: "/app/config/config.yaml"
+            - name: INCIDENT_DB_PATH
+              value: "/data/incidents.sqlite3"
+            - name: OBSERVABILITY_ALLOWED_NAMESPACES
+              value: "dev"
+            - name: OBSERVABILITY_ALLOWED_WORKLOADS
+              value: "fastapi-dev-deployment"
+            - name: OBSERVABILITY_WORKLOAD_ALIASES
+              value: "fastapi-dev-service=fastapi-dev-deployment"
+            - name: OBSERVABILITY_ARGOCD_APPLICATIONS
+              value: "fastapi-dev"
             - name: MCP_TRANSPORT
               value: "streamable-http"
             - name: MCP_HOST
               value: "0.0.0.0"
             - name: MCP_PORT
               value: "8080"
+          volumeMounts:
+            - name: incident-state
+              mountPath: /data
           resources:
             requests:
               cpu: "100m"
@@ -52,6 +67,9 @@ spec:
               port: http
             initialDelaySeconds: 15
             periodSeconds: 30
+      volumes:
+        - name: incident-state
+          emptyDir: {}
 
 ---
 apiVersion: v1

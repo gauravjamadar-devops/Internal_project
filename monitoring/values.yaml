@@ -52,3 +52,13 @@ kube-prometheus-stack:
           - matchers:
               - alertname = "Watchdog"
             receiver: "null"
+
+fastapiIncidentAlerts:
+  enabled: true
+  namespace: dev
+  workload: fastapi-dev-deployment
+  service: fastapi-dev-service
+  thresholds:
+    http5xxRatio: 0.05
+    cpuCores: 0.75
+    memoryLimitRatio: 0.8
