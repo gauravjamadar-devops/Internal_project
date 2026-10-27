@@ -10,7 +10,7 @@ FastAPI (/metrics)
 Prometheus (kube-prometheus-stack)
     ↓ PromQL HTTP API
 MCP Server (ai-observability/mcp-server/)
-    ↓ stdio / SSE transport
+    ↓ stdio locally / Streamable HTTP in Kubernetes
 AI Assistant (Claude / Antigravity)
     ↓ structured investigation
 Incident Analysis Report
@@ -32,7 +32,7 @@ ai-observability/
 ├── config/
 │   └── config.yaml              # Prometheus URL, namespace config
 └── k8s/
-    ├── rbac.yaml                # Read-only ServiceAccount + ClusterRole
+    ├── rbac.yaml                # Read-only ServiceAccount + namespace Roles
     └── deployment.yaml          # MCP server Deployment + Service
 ```
 
@@ -70,6 +70,9 @@ export PROMETHEUS_URL=http://localhost:9090
 python main.py
 ```
 
+The local default is stdio. To run the HTTP transport locally, set
+`MCP_TRANSPORT=streamable-http`, `MCP_HOST=127.0.0.1`, and `MCP_PORT=8080`.
+
 ### Test MCP Tools Directly
 ```python
 # Quick smoke test
@@ -82,22 +85,36 @@ print(get_error_rate("dev"))
 print(get_application_health("dev"))
 ```
 
+Run the isolated tool tests from `ai-observability/mcp-server`:
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## Quick Start — Kubernetes Deployment
 
 ```bash
-# 1. Build MCP server image into Minikube
-eval $(minikube docker-env)
-docker build -t mcp-observability:latest ./ai-observability/mcp-server
+# 1. Build the image using the ai-observability directory as the build context
+docker build -t mcp-observability:latest -f ai-observability/mcp-server/Dockerfile ai-observability
 
-# 2. Apply RBAC
+# 2. Load the image into Minikube
+minikube image load mcp-observability:latest
+
+# 3. Apply read-only RBAC
 kubectl apply -f ai-observability/k8s/rbac.yaml
 
-# 3. Deploy MCP server
+# 4. Deploy MCP server
 kubectl apply -f ai-observability/k8s/deployment.yaml
 
-# 4. Check it's running
+# 5. Check it's running
 kubectl get pods -n dev -l app=mcp-observability
+
+# 6. Open a local tunnel for an MCP client
+kubectl port-forward -n dev svc/mcp-observability-service 8080:8080
 ```
+
+The in-cluster server uses Streamable HTTP at `http://localhost:8080/mcp` through
+the port-forward. The Service is ClusterIP-only; do not expose it publicly
+without adding authentication and TLS.
 
 ## Testing the Full Flow
 
@@ -139,7 +156,10 @@ curl 'http://localhost:9090/api/v1/query?query=app_requests_total'
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROMETHEUS_URL` | from config.yaml | Prometheus HTTP API base URL |
-| `MCP_CONFIG_PATH` | `../config/config.yaml` | Path to MCP config file |
+| `MCP_CONFIG_PATH` | `ai-observability/config/config.yaml` | Path to MCP config file |
+| `MCP_TRANSPORT` | `stdio` | `stdio` locally or `streamable-http` in Kubernetes |
+| `MCP_HOST` | `127.0.0.1` | HTTP bind address |
+| `MCP_PORT` | `8080` | HTTP bind port |
 
 ## FastAPI Changes (main branch)
 

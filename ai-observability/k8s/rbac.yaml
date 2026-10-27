@@ -9,37 +9,27 @@ metadata:
     app: mcp-observability
 
 ---
-# ClusterRole: read-only access to pods, events, namespaces
-# Intentionally restrictive — MCP server only needs to READ, not write
+# Read-only access to the application pods/events in dev.
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: mcp-observability-reader
+  namespace: dev
   labels:
     app: mcp-observability
 rules:
   - apiGroups: [""]
     resources:
       - pods
-      - pods/status
-      - pods/log
       - events
-      - namespaces
-      - services
-      - endpoints
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["apps"]
-    resources:
-      - deployments
-      - replicasets
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
 
 ---
-# Bind the ClusterRole to the MCP server ServiceAccount
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: mcp-observability-reader-binding
+  namespace: dev
   labels:
     app: mcp-observability
 subjects:
@@ -47,6 +37,39 @@ subjects:
     name: mcp-observability-sa
     namespace: dev
 roleRef:
-  kind: ClusterRole
+  kind: Role
+  name: mcp-observability-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# The same service account may inspect production pods/events, but cannot modify them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-observability-reader
+  namespace: prod
+  labels:
+    app: mcp-observability
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - events
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+    name: mcp-observability-reader-binding
+    namespace: prod
+    labels:
+      app: mcp-observability
+subjects:
+  - kind: ServiceAccount
+    name: mcp-observability-sa
+    namespace: dev
+roleRef:
+  kind: Role
   name: mcp-observability-reader
   apiGroup: rbac.authorization.k8s.io

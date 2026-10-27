@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-mcp[cli]
+mcp[cli]>=1,<2
 kubernetes
 httpx
 pyyaml

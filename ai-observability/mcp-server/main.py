@@ -21,9 +21,12 @@ Usage:
 Environment variables:
     PROMETHEUS_URL   - Override Prometheus URL (default: from config.yaml)
     MCP_CONFIG_PATH  - Override config file path
+    MCP_TRANSPORT    - stdio (default) or streamable-http
+    MCP_HOST         - HTTP bind address (default: 127.0.0.1)
+    MCP_PORT         - HTTP bind port (default: 8080)
 """
-import sys
 import os
+import sys
 
 # Ensure the mcp-server directory is on the path when running directly
 sys.path.insert(0, os.path.dirname(__file__))
@@ -51,6 +54,8 @@ mcp = FastMCP(
         "Always retrieve live data before drawing conclusions. "
         "When asked to 'investigate', call multiple tools to gather a full picture."
     ),
+    host=os.environ.get("MCP_HOST", "127.0.0.1"),
+    port=int(os.environ.get("MCP_PORT", "8080")),
 )
 
 # ---------------------------------------------------------------------------
@@ -169,5 +174,9 @@ def get_application_health_tool(namespace: str) -> dict:
 # Entrypoint
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # stdio transport: AI client (Claude Desktop / Antigravity) connects via stdin/stdout
-    mcp.run(transport="stdio")
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+    if transport not in {"stdio", "streamable-http"}:
+        raise ValueError(
+            "MCP_TRANSPORT must be either 'stdio' or 'streamable-http'"
+        )
+    mcp.run(transport=transport)

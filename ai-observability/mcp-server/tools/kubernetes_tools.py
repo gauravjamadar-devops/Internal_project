@@ -6,8 +6,7 @@ using the in-cluster Kubernetes Python client.
 """
 from __future__ import annotations
 
-import os
-from datetime import timezone
+import re
 from typing import Any
 
 from kubernetes import client, config as k8s_config
@@ -22,12 +21,21 @@ def _load_k8s_config() -> None:
         k8s_config.load_kube_config()
 
 
+def _validate_namespace(namespace: str) -> None:
+    """Reject malformed namespace names before contacting the Kubernetes API."""
+    if not isinstance(namespace, str) or not re.fullmatch(
+        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", namespace
+    ):
+        raise ValueError(f"Invalid Kubernetes namespace: {namespace!r}")
+
+
 def get_pods(namespace: str) -> dict[str, Any]:
     """
     Return a summary of all pods in the given namespace.
 
     Returns pod name, phase, ready containers, total containers, and age.
     """
+    _validate_namespace(namespace)
     _load_k8s_config()
     v1 = client.CoreV1Api()
     try:
@@ -59,12 +67,17 @@ def get_pod_status(namespace: str, pod_name: str) -> dict[str, Any]:
     """
     Return detailed status for a specific pod, including container states.
     """
+    _validate_namespace(namespace)
+    if not pod_name:
+        raise ValueError("pod_name must not be empty")
     _load_k8s_config()
     v1 = client.CoreV1Api()
     try:
         pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
     except ApiException as e:
-        return {"error": f"Pod '{pod_name}' not found in '{namespace}': {e.reason}"}
+        if e.status == 404:
+            return {"error": f"Pod '{pod_name}' not found in '{namespace}'"}
+        return {"error": f"Kubernetes API error: {e.status} {e.reason}"}
 
     container_details = []
     for status in (pod.status.container_statuses or []):
@@ -114,6 +127,7 @@ def get_pod_restarts(namespace: str) -> dict[str, Any]:
     Return restart counts for every container in every pod in the namespace.
     Highlights pods with restarts > 0.
     """
+    _validate_namespace(namespace)
     _load_k8s_config()
     v1 = client.CoreV1Api()
     try:
@@ -150,6 +164,7 @@ def get_kubernetes_events(namespace: str) -> dict[str, Any]:
     Return Warning-level Kubernetes events in the namespace, sorted by recency.
     Normal events are filtered out to reduce noise.
     """
+    _validate_namespace(namespace)
     _load_k8s_config()
     v1 = client.CoreV1Api()
     try:
@@ -162,7 +177,7 @@ def get_kubernetes_events(namespace: str) -> dict[str, Any]:
         if event.type != "Warning":
             continue
         warning_events.append({
-            "time": str(event.last_timestamp),
+            "time": str(event.last_timestamp or event.event_time or event.first_timestamp),
             "type": event.type,
             "reason": event.reason,
             "message": event.message,

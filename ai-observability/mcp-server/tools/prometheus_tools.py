@@ -7,6 +7,7 @@ Queries the Prometheus HTTP API to retrieve application-level metrics
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 import httpx
@@ -15,16 +16,17 @@ import yaml
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "config", "config.yaml")
+_CONFIG_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "config", "config.yaml")
+)
+
+_ALLOWED_WINDOWS = {"1m", "5m", "15m"}
 
 def _load_config() -> dict:
     """Load MCP server config from YAML file."""
     config_path = os.environ.get("MCP_CONFIG_PATH", _CONFIG_PATH)
-    try:
-        with open(config_path) as f:
-            return yaml.safe_load(f)
-    except FileNotFoundError:
-        return {}
+    with open(config_path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def _prometheus_url() -> str:
@@ -33,6 +35,20 @@ def _prometheus_url() -> str:
         "PROMETHEUS_URL",
         _load_config().get("prometheus", {}).get("url", "http://localhost:9090"),
     )
+
+
+def _validate_namespace(namespace: str) -> None:
+    """Reject malformed namespace names before interpolating them into PromQL."""
+    if not isinstance(namespace, str) or not re.fullmatch(
+        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", namespace
+    ):
+        raise ValueError(f"Invalid Kubernetes namespace: {namespace!r}")
+
+
+def _validate_window(window: str) -> None:
+    if window not in _ALLOWED_WINDOWS:
+        allowed = ", ".join(sorted(_ALLOWED_WINDOWS))
+        raise ValueError(f"window must be one of: {allowed}")
 
 
 # ---------------------------------------------------------------------------
@@ -46,17 +62,28 @@ def _query(promql: str) -> dict[str, Any]:
             resp = client.get(url, params={"query": promql})
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, dict):
+                return {"error": "Prometheus returned an invalid response", "query": promql}
             if data.get("status") != "success":
                 return {"error": f"Prometheus returned status: {data.get('status')}", "query": promql}
-            return {"status": "success", "result": data["data"]["result"]}
-    except httpx.ConnectError:
+            response_data = data.get("data")
+            result = response_data.get("result") if isinstance(response_data, dict) else None
+            if not isinstance(result, list):
+                return {"error": "Prometheus response is missing query results", "query": promql}
+            return {"status": "success", "result": result}
+    except httpx.HTTPStatusError as e:
         return {
-            "error": f"Cannot connect to Prometheus at {_prometheus_url()}. "
+            "error": f"Prometheus returned HTTP {e.response.status_code}",
+            "query": promql,
+        }
+    except httpx.RequestError as e:
+        return {
+            "error": f"Cannot reach Prometheus at {_prometheus_url()}: {e}. "
                      "If running locally, ensure: kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring",
             "query": promql,
         }
-    except Exception as e:
-        return {"error": str(e), "query": promql}
+    except ValueError as e:
+        return {"error": f"Invalid Prometheus response: {e}", "query": promql}
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +96,9 @@ def get_error_rate(namespace: str, window: str = "5m") -> dict[str, Any]:
     Uses app_requests_total metric (instrumented in FastAPI app).
     Returns rate per second over the specified window (default: 5m).
     """
+    _validate_namespace(namespace)
+    _validate_window(window)
+
     # Total 5xx rate
     error_query = (
         f'sum(rate(app_requests_total{{status=~"5..",namespace="{namespace}"}}[{window}]))'
@@ -86,10 +116,21 @@ def get_error_rate(namespace: str, window: str = "5m") -> dict[str, Any]:
     total_result = _query(total_query)
     simulated_result = _query(simulated_query)
 
-    def _extract_value(result: dict) -> float | str:
+    results = {
+        "http_5xx_rate_per_sec": error_result,
+        "total_request_rate_per_sec": total_result,
+        "simulated_errors_in_window": simulated_result,
+    }
+    errors = {name: result["error"] for name, result in results.items() if "error" in result}
+    if errors:
+        return {
+            "error": "One or more Prometheus queries failed",
+            "namespace": namespace,
+            "query_errors": errors,
+        }
+
+    def _extract_value(result: dict) -> float:
         """Extract scalar value from PromQL instant query result."""
-        if "error" in result:
-            return result["error"]
         items = result.get("result", [])
         if not items:
             return 0.0
@@ -124,8 +165,7 @@ def get_application_health(namespace: str) -> dict[str, Any]:
 
     Complements Kubernetes pod health from kubernetes_tools.
     """
-    config = _load_config()
-    job = config.get("fastapi_job", "fastapi-servicemonitor")
+    _validate_namespace(namespace)
 
     # Scrape target health
     up_query = f'up{{job=~".*fastapi.*",namespace="{namespace}"}}'
@@ -140,9 +180,22 @@ def get_application_health(namespace: str) -> dict[str, Any]:
     error_result  = _query(error_rate_query)
     p99_result    = _query(p99_query)
 
+    results = {
+        "scrape_status": up_result,
+        "request_rate": req_result,
+        "error_rate": error_result,
+        "p99_latency": p99_result,
+    }
+    errors = {name: result["error"] for name, result in results.items() if "error" in result}
+    if errors:
+        return {
+            "namespace": namespace,
+            "prometheus_health": "ERROR",
+            "query_errors": errors,
+            "prometheus_url": _prometheus_url(),
+        }
+
     def _val(r: dict) -> Any:
-        if "error" in r:
-            return r["error"]
         items = r.get("result", [])
         if not items:
             return None
